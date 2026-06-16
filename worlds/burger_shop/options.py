@@ -32,8 +32,8 @@ class BonusRecipes(DefaultOnToggle):
 
 class StartWithCookies(DefaultOnToggle):
     """
-    When enabled, Cookies are added to the player's starting inventory. This can make late-game 
-    levels easier when Five Star Mode is enabled.
+    When enabled, Cookies are added to the player's starting inventory. This is recommended
+    when Five Star Mode is enabled, otherwise the late-game will be very difficult.
     """
     display_name = "Start with Cookies"
 
