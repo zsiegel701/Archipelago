@@ -1,10 +1,5 @@
 # Burger Shop
 
-## Where is the settings page?
-
-The [player settings page for this game](../player-settings) contains all the options for configuring your
-randomizer experience.
-
 ## What does randomization do to this game?
 
 All recipes, powerups, and stages are included in the item pool. What makes Burger Shop unique is
