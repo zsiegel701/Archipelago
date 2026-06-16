@@ -23,7 +23,7 @@ class StarterRecipes(Toggle):
 class BonusRecipes(DefaultOnToggle):
     """
     When enabled, a random selection of bonus recipes not present in the base game replaces
-    the filler checks. These include cheese chicken sandwiches, multi-layer BLTs, quadruple
+    the filler checks. These include cheese chicken sandwiches, bacon burgers without cheese, quadruple
     burgers, and small shake and float variants. Any customer who could order a similar item
     will be able to order the bonus version once it is unlocked.
     """
