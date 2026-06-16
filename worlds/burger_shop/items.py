@@ -25,7 +25,7 @@ ALIEN_FOOD_ITEMS: list[str] = [
 # Candidate pools for the StarterRecipes option — one item is chosen at random
 # from each list and added to the player's starting inventory.
 STARTER_LARGE_SIDES: list[str]  = ["Large Fries", "Large Onion Rings", "Large Curly Fries"]
-STARTER_LARGE_DRINKS: list[str] = ["Large Cola", "Large Orange Soda", "Vanilla Cola Float"]
+STARTER_LARGE_DRINKS: list[str] = ["Large Cola", "Large Orange Soda", "Large Lemon Lime Soda"]
 STARTER_ICE_CREAMS: list[str]   = ["Vanilla Ice Cream", "Chocolate Ice Cream", "Strawberry Ice Cream"]
 
 # Extra recipe items unlocked by the BonusRecipes option.  These are trap items
