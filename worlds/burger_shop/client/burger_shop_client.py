@@ -36,6 +36,12 @@ _CHAIN_EXE_NAME: str = "BurgerShop.exe"
 _CHAIN_BASE_OFFSET: int = 0x32251C
 _CHAIN_OFFSETS: tuple[int, ...] = (0x7C8, 0x58, 0x2C8)
 
+# Static flag: 0x00 while the level-select map is displayed, non-zero otherwise.
+# When the player is on the map screen we write level_count + 1 so the level they
+# are about to click is never the last available one, preventing the "Choose New
+# Item" popup.  The count is restored to its true value when they leave the map.
+_LEVEL_SELECT_FLAG_OFFSET: int = 0x31907F
+
 # Save file parsing constants.
 #
 #   Header layout (little-endian):
@@ -265,16 +271,26 @@ def _write_level_count(pid: int, target_count: int) -> bool:
             k32.CloseHandle(snap)
 
     if not exe_base:
-        logger.warning(f"[Burger Shop] {_CHAIN_EXE_NAME} module not found in pid {pid}.")
+        logger.debug(f"[Burger Shop] {_CHAIN_EXE_NAME} module not found in pid {pid}.")
         return False
 
     handle = k32.OpenProcess(0x0010 | 0x0020 | 0x0008 | 0x0400, False, pid)
     if not handle:
-        logger.warning(f"[Burger Shop] OpenProcess failed: {ctypes.get_last_error()}")
+        logger.debug(f"[Burger Shop] OpenProcess failed: {ctypes.get_last_error()}")
         return False
 
     try:
         buf = ctypes.create_string_buffer(4)
+
+        # On the level-select map screen, inflate the count by 1 so the level the
+        # player is about to click is never the last available one, which prevents
+        # the "Choose New Item" popup from firing.
+        flag_buf = ctypes.create_string_buffer(1)
+        if (k32.ReadProcessMemory(handle, ctypes.c_void_p(exe_base + _LEVEL_SELECT_FLAG_OFFSET),
+                                   flag_buf, 1, None)
+                and flag_buf.raw[0] == 0
+                and target_count < LEVEL_COUNT):
+            target_count += 1
 
         if not k32.ReadProcessMemory(handle, ctypes.c_void_p(exe_base + _CHAIN_BASE_OFFSET),
                                       buf, 4, None):
@@ -305,7 +321,7 @@ def _write_level_count(pid: int, target_count: int) -> bool:
         n_written = ctypes.c_size_t(0)
         if k32.WriteProcessMemory(handle, ctypes.c_void_p(target), payload, 4,
                                    ctypes.byref(n_written)):
-            logger.info(f"[Burger Shop] Level count updated ({current} → {target_count})")
+            logger.debug(f"[Burger Shop] Level count updated ({current} → {target_count})")
             return True
         return False
     finally:
@@ -487,13 +503,13 @@ class BurgerShopContext(CommonContext):
 
         if configured and os.path.isfile(os.path.join(configured, steam_utils.BURGER_SHOP_EXE)):
             self.game_path = configured
-            logger.info(f"[Burger Shop] Using configured game path: {self.game_path}")
+            logger.debug(f"[Burger Shop] Using configured game path: {self.game_path}")
             return
 
         detected = steam_utils.find_game_install_path()
         if detected:
             self.game_path = detected
-            logger.info(f"[Burger Shop] Auto-detected game installation: {self.game_path}")
+            logger.debug(f"[Burger Shop] Auto-detected game installation: {self.game_path}")
         else:
             logger.warning(
                 "[Burger Shop] Game installation not found. "
@@ -505,7 +521,7 @@ class BurgerShopContext(CommonContext):
         detected = steam_utils.find_save_directory()
         if detected:
             self.save_path = detected
-            logger.info(f"[Burger Shop] Save directory: {self.save_path}")
+            logger.debug(f"[Burger Shop] Save directory: {self.save_path}")
         
             existing = set(glob.glob(os.path.join(detected, "user*.dat")))
             self._known_save_files = existing
@@ -567,12 +583,30 @@ class BurgerShopContext(CommonContext):
             if not self._game_watcher_started:
                 self._game_watcher_started = True
                 Utils.async_start(self.game_loop(), name="BurgerShop_game_loop")
+            self._log_save_status()
 
     # ── Game loop ────────────────────────────────────────────────────────────
 
     @property
     def _session_id(self) -> str:
         return f"{self.seed_name}:{self.team}:{self.slot}:{self._generation_uid}"
+
+    def _log_save_status(self) -> None:
+        """Log which session save files are currently detected, or that none exist yet."""
+        if not self.save_path:
+            return
+        saves = sorted(
+            s for s in glob.glob(os.path.join(self.save_path, "user*.dat"))
+            if _is_session_save(s, self._session_id)
+        )
+        if not saves:
+            logger.info("[Burger Shop] Waiting for save file to be created.")
+        elif len(saves) == 1:
+            name = os.path.splitext(os.path.basename(saves[0]))[0]
+            logger.info(f"[Burger Shop] Save file found: {name}")
+        else:
+            names = ", ".join(os.path.splitext(os.path.basename(s))[0] for s in saves)
+            logger.info(f"[Burger Shop] Multiple save files found: {names}")
 
     def _get_unlocked_recipe_items(self) -> list[str]:
         """Return all received AP item names that affect XML recipes, preserving duplicates for progressive items."""
@@ -613,10 +647,12 @@ class BurgerShopContext(CommonContext):
                 baseline = frozenset(_read_completed_levels(save_file))
                 _mark_as_ap_save(save_file, session_id, baseline)
                 self._pending_new_saves.discard(save_file)
-                msg = f"[Burger Shop] Created AP sidecar for: {os.path.basename(save_file)}"
                 if baseline:
-                    msg += f" (baseline: {len(baseline)} pre-existing level(s) excluded)"
-                logger.info(msg)
+                    logger.debug(
+                        f"[Burger Shop] {os.path.basename(save_file)}: "
+                        f"{len(baseline)} pre-existing level(s) excluded from checks."
+                    )
+                self._log_save_status()
             except Exception:
                 pass  # file not yet fully written; retry next tick
 
@@ -634,14 +670,14 @@ class BurgerShopContext(CommonContext):
         self._known_save_files = current
 
     async def game_loop(self) -> None:
-        logger.info("[Burger Shop] Game watcher started.")
+        logger.debug("[Burger Shop] Game watcher started.")
         while not self.exit_event.is_set():
             try:
                 await self._tick()
             except Exception as e:
                 logger.error(f"[Burger Shop] Error in game loop: {e}")
             await asyncio.sleep(POLL_INTERVAL)
-        logger.info("[Burger Shop] Game watcher stopped.")
+        logger.debug("[Burger Shop] Game watcher stopped.")
 
     async def _tick(self) -> None:
         # Patch Order_*.xml recipe files whenever the unlocked recipe set changes.
