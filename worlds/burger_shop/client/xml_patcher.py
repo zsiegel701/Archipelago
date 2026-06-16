@@ -62,6 +62,9 @@ _BONUS_PAIRS_EXCLUDED_IDS: frozenset[str] = frozenset({
 _CROSS_FILE_DEPS: dict[str, frozenset[str]] = {
     # RandomSnackSide (Order_Random.xml) is referenced in Order_Hippy.xml's snack entries.
     "RandomSnackSide": frozenset({"SmallFries", "SmallOnionRings", "SmallCurlyFries"}),
+    # SchoolGirlMeal3 is defined in the original game XML (not our archipelago override)
+    # so _build_dead_items never sees it.  Seed it dead when its content is locked.
+    "SchoolGirlMeal3": frozenset({"LargeVanillaColaFloat"}),
 }
 
 # Files the patcher rewrites.  Order_Alien.xml is excluded by design.
