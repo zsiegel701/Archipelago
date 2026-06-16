@@ -479,6 +479,7 @@ class BurgerShopContext(CommonContext):
     five_star_mode: bool = True
     _generation_uid: str = ""
     _game_watcher_started: bool = False
+    _save_status_after_prints: int = 0
     _known_save_files: set[str]
     _pending_new_saves: set[str]  # new .dat files whose sidecars haven't been written yet
     _last_recipe_items: tuple[str, ...] | None  # None = never patched; sorted tuple for count-aware equality
@@ -576,14 +577,20 @@ class BurgerShopContext(CommonContext):
 
     def on_package(self, cmd: str, args: dict) -> None:
         super().on_package(cmd, args)
-        if cmd == "Connected":
+        if cmd == "PrintJSON" and self._save_status_after_prints > 0:
+            self._save_status_after_prints -= 1
+            if self._save_status_after_prints == 0:
+                self._log_save_status()
+        elif cmd == "Connected":
             slot_data = args.get("slot_data", {})
             self.five_star_mode = bool(slot_data.get("five_star_mode", True))
             self._generation_uid = str(slot_data.get("generation_uid", ""))
             if not self._game_watcher_started:
                 self._game_watcher_started = True
                 Utils.async_start(self.game_loop(), name="BurgerShop_game_loop")
-            self._log_save_status()
+                self._save_status_after_prints = 2
+            else:
+                self._log_save_status()
 
     # ── Game loop ────────────────────────────────────────────────────────────
 
