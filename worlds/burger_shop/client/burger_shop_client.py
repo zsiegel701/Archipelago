@@ -36,6 +36,11 @@ _CHAIN_EXE_NAME: str = "BurgerShop.exe"
 _CHAIN_BASE_OFFSET: int = 0x32251C
 _CHAIN_OFFSETS: tuple[int, ...] = (0x7C8, 0x58, 0x2C8)
 
+# Pointer chain to the currently selected save profile name (without "user_" prefix).
+# *(*(*(BurgerShop.exe + 0x3192B8) + 0x6A4) + 0x58) + 0x18 = char[64] profile name
+_PROFILE_NAME_BASE: int = 0x3192B8
+_PROFILE_NAME_OFFSETS: tuple[int, ...] = (0x6A4, 0x58, 0x18)
+
 # Static flag: 0x00 while the level-select map is displayed, non-zero otherwise.
 # When the player is on the map screen we write level_count + 1 so the level they
 # are about to click is never the last available one, preventing the "Choose New
@@ -222,6 +227,77 @@ def _find_game_pid() -> int | None:
 
 
 # ── Memory manipulation ───────────────────────────────────────────────────────
+
+def _read_profile_name(pid: int) -> str | None:
+    """Return the name of the currently loaded save profile (without 'user_' prefix), or None."""
+    if sys.platform != "win32":
+        return None
+
+    TH32CS_SNAPMODULE   = 0x00000008
+    TH32CS_SNAPMODULE32 = 0x00000010
+
+    class ME32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize",        ctypes.c_uint32),
+            ("th32ModuleID",  ctypes.c_uint32),
+            ("th32ProcessID", ctypes.c_uint32),
+            ("GlblcntUsage",  ctypes.c_uint32),
+            ("ProccntUsage",  ctypes.c_uint32),
+            ("modBaseAddr",   ctypes.c_void_p),
+            ("modBaseSize",   ctypes.c_uint32),
+            ("hModule",       ctypes.c_void_p),
+            ("szModule",      ctypes.c_wchar * 256),
+            ("szExePath",     ctypes.c_wchar * 260),
+        ]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    exe_base = 0
+    snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid)
+    invalid = ctypes.c_void_p(-1).value
+    if snap and snap != invalid:
+        try:
+            me = ME32W()
+            me.dwSize = ctypes.sizeof(me)
+            if k32.Module32FirstW(snap, ctypes.byref(me)):
+                while True:
+                    if (me.szModule or "").lower() == _CHAIN_EXE_NAME.lower():
+                        exe_base = me.modBaseAddr or 0
+                        break
+                    if not k32.Module32NextW(snap, ctypes.byref(me)):
+                        break
+        finally:
+            k32.CloseHandle(snap)
+
+    if not exe_base:
+        return None
+
+    handle = k32.OpenProcess(0x0010 | 0x0020 | 0x0008 | 0x0400, False, pid)
+    if not handle:
+        return None
+
+    try:
+        buf = ctypes.create_string_buffer(4)
+        if not k32.ReadProcessMemory(handle, ctypes.c_void_p(exe_base + _PROFILE_NAME_BASE), buf, 4, None):
+            return None
+        addr = struct.unpack_from("<I", buf.raw)[0]
+        if not addr:
+            return None
+        for off in _PROFILE_NAME_OFFSETS[:-1]:
+            if not k32.ReadProcessMemory(handle, ctypes.c_void_p(addr + off), buf, 4, None):
+                return None
+            addr = struct.unpack_from("<I", buf.raw)[0]
+            if not addr:
+                return None
+        str_buf = ctypes.create_string_buffer(64)
+        if not k32.ReadProcessMemory(handle, ctypes.c_void_p(addr + _PROFILE_NAME_OFFSETS[-1]), str_buf, 64, None):
+            return None
+        raw = str_buf.raw
+        null_pos = raw.find(b"\x00")
+        text = raw[:null_pos if null_pos >= 0 else 64].decode("ascii", errors="replace")
+        return text or None
+    finally:
+        k32.CloseHandle(handle)
+
 
 def _write_level_count(pid: int, target_count: int) -> bool:
     """
@@ -609,10 +685,10 @@ class BurgerShopContext(CommonContext):
         if not saves:
             logger.info("[Burger Shop] Waiting for save file to be created.")
         elif len(saves) == 1:
-            name = os.path.splitext(os.path.basename(saves[0]))[0]
+            name = os.path.splitext(os.path.basename(saves[0]))[0].removeprefix("user_")
             logger.info(f"[Burger Shop] Save file found: {name}")
         else:
-            names = ", ".join(os.path.splitext(os.path.basename(s))[0] for s in saves)
+            names = ", ".join(os.path.splitext(os.path.basename(s))[0].removeprefix("user_") for s in saves)
             logger.info(f"[Burger Shop] Multiple save files found: {names}")
 
     def _get_unlocked_recipe_items(self) -> list[str]:
@@ -705,29 +781,37 @@ class BurgerShopContext(CommonContext):
             if game_changes and pid is not None:
                 _patch_game_values_in_memory(pid, game_changes)
 
-        # Keep the in-memory level count correct based on received Level Keys.
+        # Determine the session save file first — needed to gate memory writes.
+        save_file: str | None = None
+        if self.save_path:
+            self._watch_for_new_saves()
+            save_file = _find_save_file(self.save_path, self._session_id)
+
+        # Keep the in-memory level count correct based on received Level Keys,
+        # but only while the player has an AP save file loaded.
         # The count field is the last accessible level number (0-indexed from "next"),
         # so write (target_levels - 1): 0 keys → 9, 7 keys → 79.
         # The final key (unlocking alien levels 71-80) only takes effect once all
         # three alien food items have also been received.
         if pid is not None:
-            key_count = self._count_level_keys()
-            has_alien_food = _ALIEN_FOOD_IDS.issubset(item.item for item in self.items_received)
-            if key_count >= LEVEL_KEY_COUNT and not has_alien_food:
-                key_count = LEVEL_KEY_COUNT - 1
-            target_count = 9 + key_count * 10
-            _write_level_count(pid, target_count)
+            profile_name = _read_profile_name(pid)
+            ap_profile_loaded = (
+                save_file is not None
+                and profile_name is not None
+                and os.path.basename(save_file) == f"user_{profile_name}.dat"
+            )
+            if ap_profile_loaded:
+                key_count = self._count_level_keys()
+                has_alien_food = _ALIEN_FOOD_IDS.issubset(item.item for item in self.items_received)
+                if key_count >= LEVEL_KEY_COUNT and not has_alien_food:
+                    key_count = LEVEL_KEY_COUNT - 1
+                target_count = 9 + key_count * 10
+                _write_level_count(pid, target_count)
 
-        if not self.save_path:
-            return
-
-        # Track new/deleted save files and manage their .ap sidecars.
-        self._watch_for_new_saves()
-
-        # Detect completed story levels from this session's save file.
-        save_file = _find_save_file(self.save_path, self._session_id)
         if save_file is None:
             return
+
+        # Detect completed story levels from this session's save file.
 
         _, baseline = _read_sidecar(save_file)
 
