@@ -1,0 +1,59 @@
+from dataclasses import dataclass
+
+from Options import DefaultOnToggle, Toggle, PerGameCommonOptions
+
+
+class FiveStarMode(DefaultOnToggle):
+    """
+    When enabled, a Story Level check is only sent after the player earns all 5 stars on that level.
+    When disabled, any completion (regardless of star count) sends the check.
+    """
+    display_name = "Five Star Mode"
+
+
+class StarterRecipes(Toggle):
+    """
+    When enabled, one random item from each of the following pools is placed into a starter location
+    and added to the player's inventory after completing any story level: a large side, a large soda,
+    an ice cream flavor, a breakfast drink, a cereal, and a soup. Customer orders will include these
+    items from early on, making gameplay immediately more demanding.
+    """
+    display_name = "Starter Recipes"
+
+
+class BonusRecipes(DefaultOnToggle):
+    """
+    When enabled, up to 16 additional trap items are added to the item pool as filler-replacements,
+    drawn randomly from: Small Vanilla/Chocolate/Strawberry Ice Cream, Small Vanilla/Chocolate/Strawberry
+    Milkshake, Small Vanilla Cola Float, Chicken Sandwich w/Cheese, Hamburger w/Bacon,
+    Quadruple Cheeseburger, Quadruple Bacon Cheeseburger, Mug Milk, Plain Pasta, and Dry
+    Flakes/Fruity Os/Oatmeal Bowl.
+    Any customer who could order a similar item
+    will be able to order the bonus version once it is unlocked.
+    """
+    display_name = "Bonus Recipes"
+
+
+class StartWithLollipops(DefaultOnToggle):
+    """
+    When enabled, Lollipops are added to the player's starting inventory. This is recommended
+    when Five Star Mode is enabled, otherwise the late-game will be very difficult.
+    """
+    display_name = "Start with Lollipops"
+
+
+class StartWithBurgerBot(Toggle):
+    """
+    When enabled, BurgerBot is added to the player's starting inventory. This can make late-game
+    levels easier when Five Star Mode is enabled.
+    """
+    display_name = "Start with BurgerBot"
+
+
+@dataclass
+class BurgerShop2Options(PerGameCommonOptions):
+    five_star_mode: FiveStarMode
+    starter_recipes: StarterRecipes
+    bonus_recipes: BonusRecipes
+    start_with_lollipops: StartWithLollipops
+    start_with_burgerbot: StartWithBurgerBot
