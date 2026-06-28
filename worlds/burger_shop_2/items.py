@@ -178,6 +178,6 @@ def create_all_items(world: BurgerShop2World) -> None:
         chosen = world.random.sample(BONUS_RECIPE_ITEMS, min(needed_filler, len(BONUS_RECIPE_ITEMS)))
         itempool += [world.create_item(name) for name in chosen]
         needed_filler -= len(chosen)
-    itempool += [world.create_filler() for _ in range(max(0, needed_filler))]
+    itempool += [world.create_filler() for _ in range(needed_filler)]
 
     world.multiworld.itempool += itempool

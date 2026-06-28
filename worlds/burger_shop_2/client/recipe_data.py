@@ -128,7 +128,6 @@ DINNER_RECIPES: list[str] = [
     "Peas",
     "Mashed Potatoes",
     "Baked Potato",
-    "Peas and Carrots",
     # Other mains
     "Lasagna",
     "Chicken Strips",
@@ -287,7 +286,6 @@ ITEM_TO_XML_ID: dict[str, list[str]] = {
     "Peas":                             ["PeasBoiled"],
     "Mashed Potatoes":                  ["PotatoMashed"],
     "Baked Potato":                     ["PotatoBaked"],
-    "Peas and Carrots":                 ["Veg_PeasCarrots"],
     # Other mains
     "Lasagna":                          ["Lasagna"],
     "Chicken Strips":                   ["ChickenStrip"],
@@ -396,6 +394,8 @@ SANDWICH_COMPOUND_VARIANTS: dict[str, list[str]] = {
     # Injected into *BreakSan pools via BONUS_PAIRS (San_BreakSausage as the base).
     "San_BreakEggSausage":       ["San_BreakEgg",       "San_BreakSausage"],
     "San_BreakEggSausageCheese": ["San_BreakEggCheese", "San_BreakSausageCheese"],
+    # Dinner vegetable compound — unlocked only when both Carrots and Peas are received.
+    "Veg_PeasCarrots":           ["CarrotsBoiled",       "PeasBoiled"],
 }
 
 # ---------------------------------------------------------------------------
