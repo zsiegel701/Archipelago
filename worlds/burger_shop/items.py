@@ -259,7 +259,10 @@ def create_all_items(world: BurgerShopWorld) -> None:
 
     # Fill remaining slots with a random draw from bonus recipes (when enabled),
     # falling back to Lucky Penny for any slots the bonus pool doesn't cover.
-    unfilled = len(world.multiworld.get_unfilled_locations(world.player))
+    unfilled = (
+        len(world.multiworld.get_unfilled_locations(world.player))
+        - len(world._starter_assignments)
+    )
     needed_filler = unfilled - len(itempool)
     if world.options.bonus_recipes and BONUS_RECIPE_ITEMS:
         chosen = world.random.sample(BONUS_RECIPE_ITEMS, min(needed_filler, len(BONUS_RECIPE_ITEMS)))
