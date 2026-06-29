@@ -5,6 +5,7 @@ import asyncio
 import ctypes
 import glob
 import os
+import re
 import struct
 import sys
 
@@ -293,7 +294,7 @@ def _read_profile_name(pid: int) -> str | None:
             return None
         raw = buf.raw
         null_pos = raw.find(b"\x00")
-        text = raw[:null_pos if null_pos >= 0 else 64].decode("ascii", errors="replace")
+        text = raw[:null_pos if null_pos >= 0 else 64].decode("latin-1")
         return text or None
     finally:
         k32.CloseHandle(handle)
@@ -446,7 +447,6 @@ class BurgerShop2Context(TrackerGameContext):
     game = "Burger Shop 2"
     items_handling = 0b111
     command_processor = BurgerShop2CommandProcessor
-    tags = {"AP"}  # drop "Tracker" tag so the server allows LocationChecks from this client
 
     game_path: str | None = None
     save_path: str | None = None
@@ -656,7 +656,7 @@ class BurgerShop2Context(TrackerGameContext):
             if pid is not None and self.save_path:
                 profile_name = _read_profile_name(pid)
                 if profile_name is not None:
-                    save_file = os.path.join(self.save_path, f"user_{profile_name}.dat")
+                    save_file = os.path.join(self.save_path, f"user_{re.sub(r'[^A-Za-z0-9]', '_', profile_name)}.dat")
                     if _is_session_save(save_file, self._session_id):
                         _write_int32(pid, _EXPERT_MODE_BASE, _EXPERT_MODE_OFFSETS, 1)
             await asyncio.sleep(_EXPERT_MODE_POLL_INTERVAL)
@@ -705,7 +705,7 @@ class BurgerShop2Context(TrackerGameContext):
             ap_profile_loaded = (
                 save_file is not None
                 and profile_name is not None
-                and os.path.basename(save_file) == f"user_{profile_name}.dat"
+                and os.path.basename(save_file) == f"user_{re.sub(r'[^A-Za-z0-9]', '_', profile_name)}.dat"
             )
             if ap_profile_loaded:
                 key_count = self._count_level_keys()
@@ -753,8 +753,6 @@ def main(url: str | None = None) -> None:
     async def _main() -> None:
         ctx = BurgerShop2Context(url, None)
         ctx.server_task = asyncio.create_task(server_loop(ctx), name="BurgerShop2_server_loop")
-        if _tracker_loaded:
-            ctx.run_generator()
         if gui_enabled:
             ctx.run_gui()
         ctx.run_cli()

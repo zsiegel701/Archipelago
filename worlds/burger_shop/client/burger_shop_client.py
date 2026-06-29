@@ -5,6 +5,7 @@ import asyncio
 import ctypes
 import glob
 import os
+import re
 import struct
 import subprocess
 import sys
@@ -293,7 +294,7 @@ def _read_profile_name(pid: int) -> str | None:
             return None
         raw = str_buf.raw
         null_pos = raw.find(b"\x00")
-        text = raw[:null_pos if null_pos >= 0 else 64].decode("ascii", errors="replace")
+        text = raw[:null_pos if null_pos >= 0 else 64].decode("latin-1")
         return text or None
     finally:
         k32.CloseHandle(handle)
@@ -798,7 +799,7 @@ class BurgerShopContext(CommonContext):
             ap_profile_loaded = (
                 save_file is not None
                 and profile_name is not None
-                and os.path.basename(save_file) == f"user_{profile_name}.dat"
+                and os.path.basename(save_file) == f"user_{re.sub(r'[^A-Za-z0-9]', '_', profile_name)}.dat"
             )
             if ap_profile_loaded:
                 key_count = self._count_level_keys()
