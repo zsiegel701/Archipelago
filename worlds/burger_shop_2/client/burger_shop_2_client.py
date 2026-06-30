@@ -447,6 +447,7 @@ class BurgerShop2Context(TrackerGameContext):
     game = "Burger Shop 2"
     items_handling = 0b111
     command_processor = BurgerShop2CommandProcessor
+    tags = {"AP"}  # drop "Tracker" tag so the server allows LocationChecks from this client
 
     game_path: str | None = None
     save_path: str | None = None
@@ -753,6 +754,8 @@ def main(url: str | None = None) -> None:
     async def _main() -> None:
         ctx = BurgerShop2Context(url, None)
         ctx.server_task = asyncio.create_task(server_loop(ctx), name="BurgerShop2_server_loop")
+        if _tracker_loaded:
+            ctx.run_generator()
         if gui_enabled:
             ctx.run_gui()
         ctx.run_cli()
