@@ -5,7 +5,7 @@ from typing import Any, ClassVar
 import settings
 from worlds.AutoWorld import World
 
-from . import items, locations, regions, rules, web_world
+from . import character_shuffle, items, locations, regions, rules, web_world
 from . import options as burger_shop2_options
 
 
@@ -49,6 +49,12 @@ class BurgerShop2World(World):
     # Items given directly to the player at start (not placed in any location).
     # Populated in generate_early; excluded from the item pool in create_items.
     _precollected_items: list[str] = []
+    # Seed for the client's DefLevel_Test.xml character shuffle. Populated in generate_early.
+    _character_seed: int = 0
+    # Resolved <Customer> id -> character groups for this slot.  Populated in
+    # generate_early because set_rules needs it: which levels are gated behind Menu,
+    # Dog Biscuit, and Shirt depends on where OldChap, DogBag, and Annoying landed.
+    character_map: dict[str, tuple[tuple[int, str], ...]] = {}
 
     @staticmethod
     def interpret_slot_data(slot_data: dict[str, Any]) -> dict[str, Any]:
@@ -63,11 +69,22 @@ class BurgerShop2World(World):
         re_gen = getattr(self.multiworld, "re_gen_passthrough", {}).get(self.game, {})
         if re_gen:
             for key in ("five_star_mode", "starter_recipes", "bonus_recipes",
-                        "start_with_lollipops", "start_with_burgerbot"):
+                        "start_with_lollipops", "start_with_burgerbot", "customer_slots",
+                        "character_randomization"):
                 opt = getattr(self.options, key, None)
                 if opt is not None and key in re_gen:
                     opt.value = re_gen[key]
             self._starter_assignments = dict(re_gen.get("starter_assignments", {}))
+            self._character_seed = int(re_gen.get("character_seed", 0))
+        else:
+            self._character_seed = self.random.getrandbits(31)
+
+        # Resolved here, before set_rules, from the same pure function the client uses,
+        # so generation, Universal Tracker, and the game all agree on where each
+        # character ended up.
+        self.character_map = character_shuffle.resolve(
+            self.options.character_randomization.value, self._character_seed
+        )
 
         if self.options.start_with_lollipops:
             self.multiworld.push_precollected(self.create_item("Lollipops"))
@@ -83,6 +100,8 @@ class BurgerShop2World(World):
                 "Starter Breakfast Drink": self.random.choice(items.STARTER_BREAKFAST_DRINKS),
                 "Starter Cereal":          self.random.choice(items.STARTER_CEREALS),
                 "Starter Soup":            self.random.choice(items.STARTER_SOUPS),
+                "Starter Toasted Item":    self.random.choice(items.STARTER_TOASTED_ITEMS),
+                "Starter Dinner Meat":     self.random.choice(items.STARTER_DINNER_MEATS),
             }
 
     def pre_fill(self) -> None:
@@ -110,8 +129,10 @@ class BurgerShop2World(World):
     def fill_slot_data(self) -> Mapping[str, Any]:
         data = dict(self.options.as_dict(
             "five_star_mode", "starter_recipes", "bonus_recipes",
-            "start_with_lollipops", "start_with_burgerbot",
+            "start_with_lollipops", "start_with_burgerbot", "customer_slots",
+            "character_randomization",
         ))
         data["generation_uid"] = uuid.uuid4().hex
         data["starter_assignments"] = self._starter_assignments
+        data["character_seed"] = self._character_seed
         return data

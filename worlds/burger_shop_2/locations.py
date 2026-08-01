@@ -23,6 +23,8 @@ LOCATION_NAME_TO_ID: dict[str, int] = {
     "Starter Breakfast Drink": 2124,
     "Starter Cereal":          2125,
     "Starter Soup":            2126,
+    "Starter Toasted Item":    2127,
+    "Starter Dinner Meat":     2128,
 }
 
 STARTER_LOCATION_NAMES: list[str] = [
@@ -32,6 +34,8 @@ STARTER_LOCATION_NAMES: list[str] = [
     "Starter Breakfast Drink",
     "Starter Cereal",
     "Starter Soup",
+    "Starter Toasted Item",
+    "Starter Dinner Meat",
 ]
 
 # Stage groupings (8 stages × 15 levels each).

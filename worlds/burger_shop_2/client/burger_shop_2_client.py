@@ -24,7 +24,7 @@ except ImportError:
     UT_VERSION = "not installed"
 
 from . import steam_utils
-from .xml_patcher import apply_bs2_recipe_unlocks
+from .xml_patcher import apply_bs2_recipe_unlocks, restart_sensitive_hash
 
 # ── Game constants ────────────────────────────────────────────────────────────
 
@@ -183,6 +183,23 @@ def _find_game_pid() -> int | None:
     except Exception:
         pass
     return None
+
+
+def _terminate_game(pid: int, timeout: float = 10.0) -> bool:
+    """Ask the game process to close, escalating to a kill; True once it is gone."""
+    try:
+        import psutil
+        proc = psutil.Process(pid)
+        proc.terminate()
+        try:
+            proc.wait(timeout=timeout)
+        except psutil.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=timeout)
+        return True
+    except Exception as e:
+        logger.debug(f"[Burger Shop 2] Failed to terminate pid {pid}: {e}")
+        return False
 
 
 def _follow_pointer_chain(
@@ -430,6 +447,11 @@ class BurgerShop2CommandProcessor(ClientCommandProcessor):
         self.ctx.launch_game()
         return True
 
+    def _cmd_restart(self) -> bool:
+        """Close Burger Shop 2 if it is running, then relaunch it via Steam."""
+        Utils.async_start(self.ctx.restart_game(), name="BurgerShop2_restart")
+        return True
+
     def _cmd_gamepath(self) -> bool:
         """Print the detected Burger Shop 2 installation path."""
         self.output(f"Game path: {self.ctx.game_path or 'Not found'}")
@@ -455,7 +477,14 @@ class BurgerShop2Context(TrackerGameContext):
     _last_recipe_items: tuple[str, ...] | None = None
     _generation_uid: str = ""
     _five_star_mode: bool = True
+    _customer_slots: int = 0  # 0 = keep the vanilla per-level counts
+    # Resolved <Customer> id -> character groups, rebuilt from slot data with the same
+    # function generation used, so the game matches the logic the seed was built with.
+    _character_map: dict | None = None
     _game_loop_started: bool = False
+    _restart_required: bool = False
+    _restart_checked: bool = False   # first tick has decided whether a restart is needed
+    _save_status_pending: bool = False
     _save_status_after_prints: int = 0
     _known_save_files: set[str]
     _pending_new_saves: set[str]
@@ -520,6 +549,20 @@ class BurgerShop2Context(TrackerGameContext):
         Utils.open_file(f"steam://rungameid/{steam_utils.BURGER_SHOP_2_STEAM_APP_ID}")
         logger.info("[Burger Shop 2] Launched via Steam.")
 
+    async def restart_game(self) -> None:
+        """Close the running game (if any) and launch it again."""
+        pid = _find_game_pid()
+        if pid is None:
+            self.launch_game()
+            return
+        logger.info("[Burger Shop 2] Closing the game...")
+        if not await asyncio.to_thread(_terminate_game, pid):
+            logger.error(
+                "[Burger Shop 2] Could not close the game. Please close and relaunch it manually."
+            )
+            return
+        self.launch_game()
+
     # ── AP server hooks ──────────────────────────────────────────────────────
 
     async def server_auth(self, password_requested: bool = False) -> None:
@@ -535,7 +578,18 @@ class BurgerShop2Context(TrackerGameContext):
         return f"{self.seed_name}:{self.team}:{self.slot}:{self._generation_uid}"
 
     def _log_save_status(self) -> None:
-        """Log which session save files are currently detected, or that none exist yet."""
+        """Log which session save files are currently detected, or that none exist yet.
+
+        Held back until the first tick has established whether a restart is needed, then
+        suppressed for as long as one is pending.  This message is otherwise triggered by
+        a PrintJSON countdown that can easily win the race against the first tick, which
+        would put "Waiting for save file" above the restart warning and bury it.  _tick
+        releases the deferred message once the stale process is gone.
+        """
+        if not self._restart_checked or self._restart_required:
+            self._save_status_pending = True
+            return
+        self._save_status_pending = False
         if not self.save_path:
             return
         saves = sorted(
@@ -564,6 +618,13 @@ class BurgerShop2Context(TrackerGameContext):
             self.slot_data = slot_data
             self._generation_uid = str(slot_data.get("generation_uid", ""))
             self._five_star_mode = bool(slot_data.get("five_star_mode", 1))
+            self._customer_slots = int(slot_data.get("customer_slots", 0))
+            from worlds.burger_shop_2 import character_shuffle
+            mode = int(slot_data.get("character_randomization", character_shuffle.VANILLA))
+            self._character_map = (
+                None if mode == character_shuffle.VANILLA
+                else character_shuffle.resolve(mode, int(slot_data.get("character_seed", 0)))
+            )
             if not self._game_loop_started:
                 self._game_loop_started = True
                 Utils.async_start(self.game_loop(), name="BurgerShop2_game_loop")
@@ -654,7 +715,7 @@ class BurgerShop2Context(TrackerGameContext):
         """
         while not self.exit_event.is_set():
             pid = _find_game_pid()
-            if pid is not None and self.save_path:
+            if pid is not None and self.save_path and not self._restart_required:
                 profile_name = _read_profile_name(pid)
                 if profile_name is not None:
                     save_file = os.path.join(self.save_path, f"user_{re.sub(r'[^A-Za-z0-9]', '_', profile_name)}.dat")
@@ -680,10 +741,41 @@ class BurgerShop2Context(TrackerGameContext):
         pid = _find_game_pid()
 
         if recipe_key != self._last_recipe_items and self.game_path:
-            _, game_changes = apply_bs2_recipe_unlocks(self.game_path, recipe_items)
+            # Game.xml and GameExp.xml are parsed once at process start, so a change to
+            # them while the game is running is invisible until it is relaunched.  In
+            # practice this only happens on the first tick, when the level data for this
+            # seed is written for the first time.
+            before = restart_sensitive_hash(self.game_path) if pid is not None else ""
+            _, game_changes = apply_bs2_recipe_unlocks(
+                self.game_path, recipe_items, self._customer_slots, self._character_map,
+            )
             self._last_recipe_items = recipe_key
-            if game_changes and pid is not None:
-                _patch_game_values_in_memory(pid, game_changes)
+            if pid is not None:
+                if game_changes:
+                    _patch_game_values_in_memory(pid, game_changes)
+                if before and restart_sensitive_hash(self.game_path) != before:
+                    self._restart_required = True
+                    logger.warning(
+                        "[Burger Shop 2] Level data changed, but Burger Shop 2 is already "
+                        "running. Close and relaunch the game (or use /restart) before "
+                        "loading your save file. Progress made until then is not tracked."
+                    )
+
+        # Whether a restart is needed is settled by the patch above, which always runs on
+        # the first tick.  Nothing may report save status before this point.
+        self._restart_checked = True
+
+        # The running game is working from the level data it read at launch, so nothing
+        # it reports matches this seed.  Track nothing until the process is gone.
+        if self._restart_required:
+            if pid is not None:
+                return
+            self._restart_required = False
+            logger.info("[Burger Shop 2] Game closed. Level data will load correctly on next launch.")
+            self._save_status_pending = True
+
+        if self._save_status_pending:
+            self._log_save_status()
 
         # Read save data to track completed levels for the goal condition.
         save_file: str | None = None

@@ -15,8 +15,13 @@ NOT patched (main filter pass):
   ComplexItems.xml   — patched selectively via _patch_complexitems_flairs instead
                        (salad flairs and Snack_Side only; sandwich bodies untouched)
   DefLevelExp.xml    — level structure (untouched)
-  *_Alien.xml        — kept intact so alien levels always function
   Game.xml / Layout*.xml — patched separately for powerup/equipment attributes
+
+*_Alien.xml IS patched like any other character file.  Burger Shop 2 has no built-in
+alien levels (DefLevel_Test.xml never references the Alien), so the Alien only appears
+when Character Randomization places it, and there is no alien-specific requirement to
+protect the way Burger Shop 1 has.  A fully locked-out alien order falls back to the
+Random meal for that mealtime, same as every other character.
 
 Filtering rules:
   1. Elements with prunecat="breakfast" are never modified — always-available
@@ -34,6 +39,7 @@ Filtering rules:
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -83,6 +89,44 @@ _RANDOM_FILES: tuple[str, ...] = (
     "Order_Random.xml",
     "Dinner_Random.xml",
 )
+
+# When a customer's whole order collapses because everything in it is still locked,
+# the <Item> is stubbed rather than deleted so the <Customer> reference still resolves.
+# The stub is the Random customer's meal for that mealtime, which keeps the order
+# plausible and varied instead of turning every starved customer into a plain burger.
+_RANDOM_MEALS: dict[str, str] = {
+    "breakfast": "RandomMealBR",   # Breakfast_Random.xml
+    "order":     "RandomMealLU",   # Order_Random.xml   (lunch)
+    "dinner":    "RandomMealDI",   # Dinner_Random.xml
+}
+# Always unlocked (_ALWAYS_UNLOCKED), so this can never itself be dead.
+_LAST_RESORT_STUB: str = "San_Hamburger"
+
+
+def _meal_kind(filename: str) -> str:
+    """Return 'breakfast' | 'order' | 'dinner' | 'all' for a customer file, else ''."""
+    low = filename.lower()
+    if low.startswith("all_"):
+        return "all"
+    for kind in _RANDOM_MEALS:
+        if low.startswith(kind + "_"):
+            return kind
+    return ""
+
+
+def _pick_stub(filename: str, dead: frozenset[str]) -> str:
+    """Choose the fallback order for *filename*, avoiding one that is itself dead.
+
+    Only the per-mealtime customer files get the Random meal.  All_*.xml is excluded:
+    it stubs every empty element rather than just customer roots, purely to keep
+    aggregate IDs present in the registry for DefLevelExp.xml and other unpatched
+    files.  Substituting a whole random meal for what was, say, a side dish would
+    change what those levels actually serve, so they keep the inert burger stub.
+    """
+    meal = _RANDOM_MEALS.get(_meal_kind(filename))
+    if meal is not None and meal not in dead:
+        return meal
+    return _LAST_RESORT_STUB
 
 # Flair IDs inside ComplexItems.xml whose entries can be safely patched.
 # Tomato and Onions also appear in sandwich bodies in ComplexItems.xml, so the
@@ -154,24 +198,108 @@ _CUSTOMER_BODY_RE = re.compile(r"<Customer\b[^>]*>(.*?)</Customer>", re.IGNORECA
 _ATTR_RE = re.compile(r'\b(\w+)\s*=\s*"([^"]*)"')
 
 # ---------------------------------------------------------------------------
+# School Girls order-size preservation
+# ---------------------------------------------------------------------------
+#
+# Two School Girls order components ask for a fixed number of items, and
+# normal pruning can quietly shrink that count when only some of the
+# alternatives are unlocked:
+#
+#   Pattern A - literal combo lists (type="list" with bare comma-separated
+#   entries, e.g. SchoolGirlsMealDI3's "ChickenSoup, TomatoSoup ..., PotatoSoup
+#   ..." soup course).  Pruning removes locked entries outright, so 3 distinct
+#   soups can collapse to 1.  Fix: pad the survivors back up to the original
+#   entry count by cycling through them.
+#
+#   Pattern B - "N+ Pool" required-distinct-picks (e.g. "3+ SchoolGirlDrink").
+#   When Pool's own alternatives shrink below N, the request becomes
+#   unsatisfiable.  Fix: once Pool has fewer than N (but more than 0) live
+#   alternatives, rewrite "N+ Pool" to "N Pool" - dropping the "+" switches it
+#   from "N distinct" to "N independent rerolls", which naturally duplicates
+#   whatever remains (the same mechanic already used by e.g.
+#   SchoolGirlsWaffleOrder's "3 SchoolGirlsWafflePlate").
+
+_SCHOOLGIRLS_PAD_TO_ORIGINAL_COUNT: frozenset[str] = frozenset({
+    "SchoolGirlsMealDI2",     # Dinner: large drink course (Orange/Cola/LemonLime)
+    "SchoolGirlsMealDI3",     # Dinner: soup course (Chicken/Tomato/Potato)
+    "SchoolGirlMealLU1",      # Order (lunch): sundae course (Vanilla/Chocolate/Strawberry)
+    "SchoolGirlsDonutOrder",  # Breakfast: donut course (3 flavors)
+})
+
+_SCHOOLGIRLS_RELAX_REQUIRED_PICKS: frozenset[str] = frozenset({
+    "SchoolGirlsMealDI1",        # Dinner: pizza combo's "3+ SchoolGirlsSmallDrink"
+    "SchoolGirlMealLU2",         # Order (lunch): 3+ SchoolGirlDrink, 3+ SchoolGirlSide
+    "SchoolGirlsSandwichOrder",  # Breakfast: 3+ SchoolGirlsBreakSan
+})
+
+_N_PLUS_ENTRY_RE = re.compile(r"^(\d+)\+ (\S+)$")
+
+
+def _compute_kept_counts(
+    text: str,
+    unlocked: frozenset[str],
+    dead: frozenset[str],
+) -> dict[str, int]:
+    """Return item id -> number of entries that survive filtering (ignoring bonus injection).
+
+    Used to look up how many live alternatives a referenced pool (e.g.
+    SchoolGirlDrink) has, independent of the single left-to-right substitution
+    pass over the file.
+    """
+    counts: dict[str, int] = {}
+    for m in _ELEM_RE.finditer(text):
+        if m.group(2).lower() != "item":
+            continue
+        id_m = _ID_ATTR_RE.search(m.group(3))
+        if not id_m:
+            continue
+        entries = _split_entries(m.group(4))
+        sandwich_context = any(
+            "BreakfastSandwich" in _entry_value(e).split()
+            for e in entries
+        )
+        kept = sum(
+            1 for e in entries
+            if not _entry_is_blocked(e, unlocked, dead, sandwich_context)
+        )
+        counts[id_m.group(1)] = kept
+    return counts
+
+
+def _relax_required_picks(entries: list[str], pool_kept_counts: dict[str, int]) -> list[str]:
+    """Rewrite 'N+ Pool' entries to 'N Pool' when Pool has fewer than N live
+    alternatives (but at least one), so the customer still gets N items via
+    duplicates instead of fewer than N."""
+    result = []
+    for entry in entries:
+        m = _N_PLUS_ENTRY_RE.match(entry)
+        if m:
+            n, pool_id = int(m.group(1)), m.group(2)
+            kept_count = pool_kept_counts.get(pool_id)
+            if kept_count is not None and 0 < kept_count < n:
+                entry = f"{n} {pool_id}"
+        result.append(entry)
+    return result
+
+# ---------------------------------------------------------------------------
 # Game.xml powerup patching
 # ---------------------------------------------------------------------------
 
 _GAME_DISABLED: dict[str, str] = {
     "PowerupFreq_Cookie":    "600000002",  # Lollipop Powerup
-    "PowerupFreq_AllHappy":  "700000003",  # Happy Powerup
+    "PowerupFreq_AllHappy":  "700000003",  # Freeze Powerup
     "PowerupFreq_Money":     "800000004",  # Money Powerup
     "PowerupFreq_Speed":     "900000005",  # Speed Powerup
-    "PowerupFreq_HappyGas":  "500000001",  # Freeze Powerup
+    "PowerupFreq_HappyGas":  "500000001",  # Happy Powerup
     "PowerupFreq_CloseSlot": "400000000",  # Cone Powerup
 }
 
 _ATTR_ENABLED_BY: dict[str, frozenset[str]] = {
     "PowerupFreq_Cookie":    frozenset({"Lollipop Powerup"}),
-    "PowerupFreq_AllHappy":  frozenset({"Happy Powerup"}),
+    "PowerupFreq_AllHappy":  frozenset({"Freeze Powerup"}),
     "PowerupFreq_Money":     frozenset({"Money Powerup"}),
     "PowerupFreq_Speed":     frozenset({"Speed Powerup"}),
-    "PowerupFreq_HappyGas":  frozenset({"Freeze Powerup"}),
+    "PowerupFreq_HappyGas":  frozenset({"Happy Powerup"}),
     "PowerupFreq_CloseSlot": frozenset({"Cone Powerup"}),
 }
 
@@ -448,17 +576,22 @@ def _filter_xml(
     unlocked: frozenset[str],
     initial_dead: frozenset[str] = frozenset(),
     delete_empty: bool = True,
+    inject_bonus: bool = True,
+    stub_order: str = _LAST_RESORT_STUB,
 ) -> str:
     dead = _build_dead_items(text, unlocked, initial_dead)
     void_flairs = _compute_void_flairs(text, unlocked, dead)
     # Second pass: items with required (+) void-flair references are now also dead
     # (e.g. RandomDessertCourse referencing a void RandomCake+ flair).
     dead = _build_dead_items(text, unlocked, initial_dead, void_flairs)
+    pool_kept_counts = _compute_kept_counts(text, unlocked, dead)
 
     def _replace(m: re.Match) -> str:
         tag_name = m.group(2).lower()
         attrs = m.group(3)
         body = m.group(4)
+        id_m = _ID_ATTR_RE.search(attrs)
+        element_id = id_m.group(1) if id_m else None
 
         if _is_protected(attrs):
             # Protected flairs (prunecat="breakfast") keep all ingredient entries
@@ -476,12 +609,12 @@ def _filter_xml(
         # otherwise leave optional topping/side entries intact while the required base
         # is gone (e.g. RandomLasagna keeping "60 RandomLasagnaSide" after Lasagna+ is
         # stripped, or RandomPastaPlate keeping "50 RandomPastaRoll" without pasta).
-        if tag_name == "flair" and void_flairs:
-            id_m = _ID_ATTR_RE.search(attrs)
-            if id_m and id_m.group(1) in void_flairs:
-                return m.group(1) + "noflair" + m.group(5)
+        if tag_name == "flair" and void_flairs and element_id in void_flairs:
+            return m.group(1) + "noflair" + m.group(5)
 
         entries = _split_entries(body)
+        if element_id in _SCHOOLGIRLS_RELAX_REQUIRED_PICKS:
+            entries = _relax_required_picks(entries, pool_kept_counts)
         sandwich_context = tag_name == "item" and any(
             "BreakfastSandwich" in _entry_value(e).split()
             for e in entries
@@ -505,10 +638,33 @@ def _filter_xml(
         # present in this Item element and the bonus AP item is now unlocked, append
         # the bonus item ID.  The bonus IDs are never present in the source (.orig)
         # files — the patcher is the only thing that writes them.
-        if tag_name in ("item", "flair"):
+        # inject_bonus=False is used for files where bonus recipes must never appear
+        # (e.g. ninja customer files) regardless of what the player has unlocked.
+        if inject_bonus and tag_name in ("item", "flair"):
             for bonus_xml, base_xml in BONUS_PAIRS.items():
                 if base_xml in original_values and bonus_xml in unlocked:
                     kept.append(bonus_xml)
+
+        # Pad literal combo lists (e.g. the School Girls soup course) back up to
+        # their original entry count by cycling through the survivors, so pruning
+        # locked alternatives shrinks variety instead of shrinking the order size.
+        # Repeats are collapsed into "N entry" weight form (the same idiom the
+        # vanilla files already use for literal duplicates, e.g. "3 SchoolGirlsWafflePlate")
+        # rather than writing the same entry out several times.
+        if (
+            tag_name == "item"
+            and element_id in _SCHOOLGIRLS_PAD_TO_ORIGINAL_COUNT
+            and kept
+            and len(kept) < len(entries)
+        ):
+            cycle = [kept[i % len(kept)] for i in range(len(entries))]
+            counts: dict[str, int] = {}
+            order: list[str] = []
+            for e in cycle:
+                if e not in counts:
+                    order.append(e)
+                counts[e] = counts.get(e, 0) + 1
+            kept = [e if counts[e] == 1 else f"{counts[e]} {e}" for e in order]
 
         if kept and all(
             _WEIGHT_RE.match(e) and _WEIGHT_RE.match(e).group(1) == "0"
@@ -535,9 +691,14 @@ def _filter_xml(
     # the customer definition.  Collect these from the original (pre-filter) text.
     customer_roots = _customer_root_ids(text)
 
-    def _hamburger_stub(m: re.Match) -> str:
+    def _stub(m: re.Match) -> str:
         open_tag = re.search(r"<Item\b[^>]*>", m.group(0), re.IGNORECASE).group(0)
-        return f"{open_tag}San_Hamburger</Item>\n"
+        id_m = _ID_ATTR_RE.search(open_tag)
+        # The Random pool files define the stub target themselves (Breakfast_Random.xml
+        # owns RandomMealBR), so stubbing their root with it would make the item
+        # reference itself.  Fall back to the plain burger in that one case.
+        body = _LAST_RESORT_STUB if id_m and id_m.group(1) == stub_order else stub_order
+        return f"{open_tag}{body}</Item>\n"
 
     if delete_empty:
         def _handle_empty(m: re.Match) -> str:
@@ -546,13 +707,13 @@ def _filter_xml(
             if id_m and id_m.group(1) in customer_roots:
                 # Root meal item — stub rather than delete so the Customer reference
                 # remains resolvable. Surfer's SurferMealBR is the canonical example.
-                return f"{open_tag}San_Hamburger</Item>\n"
+                return _stub(m)
             return ""
         result = _EMPTY_ITEM_RE.sub(_handle_empty, result)
     else:
         # All_*.xml: keep ALL empty items as stubs so aggregate IDs referenced by
         # DefLevelExp.xml and other unpatched files remain in the registry.
-        result = _EMPTY_ITEM_RE.sub(_hamburger_stub, result)
+        result = _EMPTY_ITEM_RE.sub(_stub, result)
 
     return result
 
@@ -591,6 +752,53 @@ def _patch_layout_file(levels_dir: str, filename: str, received: frozenset[str])
         f.write(text)
 
 
+# ---------------------------------------------------------------------------
+# DefLevel_Test.xml character randomization
+# ---------------------------------------------------------------------------
+#
+# Each <Customer> element lists the characters that can appear in the levels that
+# reference it, as comma-separated "<count> <Character>" groups.
+#
+# The shuffle itself lives in the world package (character_shuffle.resolve), not
+# here, because generation needs the same answer to decide which levels are gated
+# behind Menu / Dog Biscuit / Shirt.  This module only writes the resolved mapping
+# into the file.
+
+_DEFLEVEL_FILE: str = "DefLevel_Test.xml"
+
+_CUSTOMER_ELEM_RE = re.compile(
+    r'(<Customer\b[^>]*\bid="([^"]+)"[^>]*>)(.*?)(</Customer>)', re.IGNORECASE | re.DOTALL
+)
+
+
+def _patch_deflevel_xml(levels_dir: str, character_map: dict | None) -> None:
+    """Write *character_map* into DefLevel_Test.xml; restore vanilla when it is None."""
+    src = os.path.join(levels_dir, _DEFLEVEL_FILE)
+    orig = src + ".orig"
+
+    if not os.path.isfile(src):
+        return
+
+    if not os.path.isfile(orig):
+        shutil.copy2(src, orig)
+
+    with open(orig, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+
+    if character_map:
+        def _replace(m: re.Match) -> str:
+            groups = character_map.get(m.group(2))
+            if not groups:
+                return m.group(0)
+            body = ", ".join(f"{count} {name}" for count, name in groups)
+            return m.group(1) + body + m.group(4)
+
+        text = _CUSTOMER_ELEM_RE.sub(_replace, text)
+
+    with open(src, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
 _COORDS_OX_HIDDEN: str = "2100000000"
 
 
@@ -618,7 +826,11 @@ def _patch_coords_xml(levels_dir: str, received: frozenset[str]) -> None:
         f.writelines(lines)
 
 
-def _patch_game_xml(levels_dir: str, received: frozenset[str]) -> list[tuple[str, str]]:
+def _patch_game_xml(
+    levels_dir: str,
+    received: frozenset[str],
+    customer_slots: int = 0,
+) -> list[tuple[str, str]]:
     game_src = os.path.join(levels_dir, "Game.xml")
     game_orig = game_src + ".orig"
     gameexp_src = os.path.join(levels_dir, "GameExp.xml")
@@ -646,6 +858,13 @@ def _patch_game_xml(levels_dir: str, received: frozenset[str]) -> list[tuple[str
     for attr, disabled_value in _GAME_DISABLED.items():
         if not (_ATTR_ENABLED_BY[attr] & received):
             text = _set_attr(text, attr, disabled_value)
+
+    # CustomerSlots appears in the leading DefVals block, in the per-section DefVals
+    # resets that follow it, and as per-Level overrides.  Rewriting every occurrence
+    # is what makes the count uniform — a single Level override would otherwise win
+    # over the DefVals default for that level.  0 means "leave the vanilla counts".
+    if customer_slots:
+        text = _set_attr(text, "CustomerSlots", str(customer_slots))
 
     prev_vals = {m.group(1): m.group(2) for m in _ATTR_RE.finditer(prev_text)}
     new_vals = {m.group(1): m.group(2) for m in _ATTR_RE.finditer(text)}
@@ -678,7 +897,10 @@ def _patch_file(
     unlocked: frozenset[str],
     initial_dead: frozenset[str] = frozenset(),
     delete_empty: bool = True,
+    inject_bonus: bool = True,
 ) -> frozenset[str]:
+    """Filter one customer file.  The empty-order stub is chosen from *filename*'s
+    mealtime, so a starved breakfast customer falls back to the Random breakfast."""
     src = os.path.join(levels_dir, filename)
     orig = src + ".orig"
 
@@ -695,8 +917,10 @@ def _patch_file(
     void_flairs = _compute_void_flairs(text, unlocked, dead)
     dead = _build_dead_items(text, unlocked, initial_dead, void_flairs)
 
+    stub_order = _pick_stub(filename, initial_dead | dead)
+
     with open(src, "w", encoding="utf-8") as f:
-        f.write(_filter_xml(text, unlocked, initial_dead, delete_empty))
+        f.write(_filter_xml(text, unlocked, initial_dead, delete_empty, inject_bonus, stub_order))
 
     return dead
 
@@ -760,13 +984,47 @@ def _patch_complexitems_flairs(
 # Public API
 # ---------------------------------------------------------------------------
 
+# The only files the game parses once at process start.  Everything else the
+# patcher writes is re-read when a level loads, so changes to those reach the
+# player without a restart.
+_RESTART_SENSITIVE_FILES: tuple[str, ...] = ("Game.xml", "GameExp.xml")
+
+
+def restart_sensitive_hash(game_path: str) -> str:
+    """Hash the startup-only files so callers can tell when a game restart is needed.
+
+    The powerup frequency attributes are blanked before hashing — those are pushed
+    into the running process by the client's memory patcher, so a change to them
+    alone never requires a restart.  A change to anything else in these files
+    (the Level table, DefVals) only reaches the player on the next launch.
+    """
+    h = hashlib.sha1()
+    levels = _levels_dir(game_path)
+    for name in _RESTART_SENSITIVE_FILES:
+        try:
+            with open(os.path.join(levels, name), encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            text = ""
+        for attr in _GAME_DISABLED:
+            text = _set_attr(text, attr, "")
+        h.update(text.encode("utf-8"))
+    return h.hexdigest()
+
+
 def apply_bs2_recipe_unlocks(
     game_path: str,
     received_item_names: list[str],
+    customer_slots: int = 0,
+    character_map: dict | None = None,
 ) -> tuple[bool, list[tuple[str, str]]]:
     """
     Rewrite Breakfast/Order/Dinner customer XML files to reflect received AP items.
     Also patches Game.xml powerup attributes if present.
+
+    *customer_slots* forces every level to that many customer slots; 0 keeps the
+    vanilla per-level counts.  *character_map* is the resolved <Customer> id -> groups
+    mapping from character_shuffle.resolve(); None leaves the vanilla characters.
 
     Returns ``(success, game_xml_changes)`` where *success* is False when the
     archipelago/levels directory has not been set up.
@@ -804,8 +1062,6 @@ def apply_bs2_recipe_unlocks(
             continue
         if name.lower() in _SKIP_FILES:
             continue
-        if name.lower().endswith("_alien.xml"):
-            continue
         if name.lower().startswith("all_"):
             all_xml_names.append(name)
             continue
@@ -813,7 +1069,8 @@ def apply_bs2_recipe_unlocks(
                 or name.lower().startswith("order_")
                 or name.lower().startswith("dinner_")):
             try:
-                dead = _patch_file(levels, name, unlocked, cross_dead)
+                is_ninja = name.lower().endswith("_ninja.xml")
+                dead = _patch_file(levels, name, unlocked, cross_dead, inject_bonus=not is_ninja)
                 char_dead_acc.update(dead)
             except OSError as e:
                 logger.warning(f"[Burger Shop 2] Failed to patch {name}: {e}")
@@ -838,7 +1095,7 @@ def apply_bs2_recipe_unlocks(
 
     game_xml_changes: list[tuple[str, str]] = []
     try:
-        game_xml_changes = _patch_game_xml(levels, received_set)
+        game_xml_changes = _patch_game_xml(levels, received_set, customer_slots)
     except OSError as e:
         logger.warning(f"[Burger Shop 2] Failed to patch Game.xml: {e}")
 
@@ -852,6 +1109,11 @@ def apply_bs2_recipe_unlocks(
         _patch_coords_xml(levels, received_set)
     except OSError as e:
         logger.warning(f"[Burger Shop 2] Failed to patch Coords.xml: {e}")
+
+    try:
+        _patch_deflevel_xml(levels, character_map)
+    except OSError as e:
+        logger.warning(f"[Burger Shop 2] Failed to patch {_DEFLEVEL_FILE}: {e}")
 
     logger.debug(f"[Burger Shop 2] XML patched ({len(received_item_names)} item(s) unlocked).")
     return True, game_xml_changes

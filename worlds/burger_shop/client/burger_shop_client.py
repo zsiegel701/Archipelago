@@ -227,6 +227,23 @@ def _find_game_pid() -> int | None:
     return None
 
 
+def _terminate_game(pid: int, timeout: float = 10.0) -> bool:
+    """Ask the game process to close, escalating to a kill; True once it is gone."""
+    try:
+        import psutil
+        proc = psutil.Process(pid)
+        proc.terminate()
+        try:
+            proc.wait(timeout=timeout)
+        except psutil.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=timeout)
+        return True
+    except Exception as e:
+        logger.debug(f"[Burger Shop] Failed to terminate pid {pid}: {e}")
+        return False
+
+
 # ── Memory manipulation ───────────────────────────────────────────────────────
 
 def _read_profile_name(pid: int) -> str | None:
@@ -535,6 +552,11 @@ class BurgerShopCommandProcessor(ClientCommandProcessor):
         self.ctx.launch_game()
         return True
 
+    def _cmd_restart(self) -> bool:
+        """Close Burger Shop if it is running, then launch it again."""
+        Utils.async_start(self.ctx.restart_game(), name="BurgerShop_restart")
+        return True
+
     def _cmd_gamepath(self) -> bool:
         """Print the detected Burger Shop installation path."""
         self.output(f"Game path: {self.ctx.game_path or 'Not found'}")
@@ -554,8 +576,14 @@ class BurgerShopContext(CommonContext):
     game_path: str | None = None
     save_path: str | None = None
     five_star_mode: bool = True
+    _customer_slots: int = 0  # 0 = keep the vanilla per-level counts
+    _character_randomization: int = 0
+    _character_seed: int = 0
     _generation_uid: str = ""
     _game_watcher_started: bool = False
+    _restart_required: bool = False
+    _restart_checked: bool = False   # first tick has decided whether a restart is needed
+    _save_status_pending: bool = False
     _save_status_after_prints: int = 0
     _known_save_files: set[str]
     _pending_new_saves: set[str]  # new .dat files whose sidecars haven't been written yet
@@ -644,6 +672,20 @@ class BurgerShopContext(CommonContext):
                 "Set game_install_path in host.yaml."
             )
 
+    async def restart_game(self) -> None:
+        """Close the running game (if any) and launch it again."""
+        pid = _find_game_pid()
+        if pid is None:
+            self.launch_game()
+            return
+        logger.info("[Burger Shop] Closing the game...")
+        if not await asyncio.to_thread(_terminate_game, pid):
+            logger.error(
+                "[Burger Shop] Could not close the game. Please close and relaunch it manually."
+            )
+            return
+        self.launch_game()
+
     # ── AP server hooks ──────────────────────────────────────────────────────
 
     async def server_auth(self, password_requested: bool = False) -> None:
@@ -661,6 +703,9 @@ class BurgerShopContext(CommonContext):
         elif cmd == "Connected":
             slot_data = args.get("slot_data", {})
             self.five_star_mode = bool(slot_data.get("five_star_mode", True))
+            self._customer_slots = int(slot_data.get("customer_slots", 0))
+            self._character_randomization = int(slot_data.get("character_randomization", 0))
+            self._character_seed = int(slot_data.get("character_seed", 0))
             self._generation_uid = str(slot_data.get("generation_uid", ""))
             if not self._game_watcher_started:
                 self._game_watcher_started = True
@@ -676,7 +721,18 @@ class BurgerShopContext(CommonContext):
         return f"{self.seed_name}:{self.team}:{self.slot}:{self._generation_uid}"
 
     def _log_save_status(self) -> None:
-        """Log which session save files are currently detected, or that none exist yet."""
+        """Log which session save files are currently detected, or that none exist yet.
+
+        Held back until the first tick has established whether a restart is needed, then
+        suppressed for as long as one is pending.  This message is otherwise triggered by
+        a PrintJSON countdown that can easily win the race against the first tick, which
+        would put "Waiting for save file" above the restart warning and bury it.  _tick
+        releases the deferred message once the stale process is gone.
+        """
+        if not self._restart_checked or self._restart_required:
+            self._save_status_pending = True
+            return
+        self._save_status_pending = False
         if not self.save_path:
             return
         saves = sorted(
@@ -774,13 +830,44 @@ class BurgerShopContext(CommonContext):
         pid = _find_game_pid()
 
         if recipe_key != self._last_recipe_items and self.game_path:
-            from .xml_patcher import apply_recipe_unlocks
-            _, game_changes = apply_recipe_unlocks(self.game_path, recipe_items)
+            from .xml_patcher import apply_recipe_unlocks, restart_sensitive_hash
+            # Game.xml is parsed once at process start, so a change to it while the game
+            # is running is invisible until it is relaunched.  In practice this only
+            # happens on the first tick, when this seed's level data is first written.
+            before = restart_sensitive_hash(self.game_path) if pid is not None else ""
+            _, game_changes = apply_recipe_unlocks(
+                self.game_path, recipe_items, self._customer_slots,
+                self._character_randomization, self._character_seed,
+            )
             self._last_recipe_items = recipe_key
-            # Push any Game.xml attribute changes into live game memory so powerup
-            # unlocks take effect immediately without requiring a restart.
-            if game_changes and pid is not None:
-                _patch_game_values_in_memory(pid, game_changes)
+            if pid is not None:
+                # Push any Game.xml attribute changes into live game memory so powerup
+                # unlocks take effect immediately without requiring a restart.
+                if game_changes:
+                    _patch_game_values_in_memory(pid, game_changes)
+                if before and restart_sensitive_hash(self.game_path) != before:
+                    self._restart_required = True
+                    logger.warning(
+                        "[Burger Shop] Level data changed, but Burger Shop is already "
+                        "running. Close and relaunch the game (or use /restart) before "
+                        "loading your save file. Progress made until then is not tracked."
+                    )
+
+        # Whether a restart is needed is settled by the patch above, which always runs on
+        # the first tick.  Nothing may report save status before this point.
+        self._restart_checked = True
+
+        # The running game is working from the level data it read at launch, so nothing
+        # it reports matches this seed.  Track nothing until the process is gone.
+        if self._restart_required:
+            if pid is not None:
+                return
+            self._restart_required = False
+            logger.info("[Burger Shop] Game closed. Level data will load correctly on next launch.")
+            self._save_status_pending = True
+
+        if self._save_status_pending:
+            self._log_save_status()
 
         # Determine the session save file first — needed to gate memory writes.
         save_file: str | None = None

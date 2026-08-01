@@ -24,6 +24,8 @@ STARTER_ICE_CREAMS: list[str]        = ["Vanilla Ice Cream", "Chocolate Ice Crea
 STARTER_BREAKFAST_DRINKS: list[str]  = ["Glass of Milk", "Orange Juice", "Coffee"]
 STARTER_CEREALS: list[str]           = ["Fruity Os Cereal", "Tasty Flakes Cereal", "Oatmeal"]
 STARTER_SOUPS: list[str]             = ["Chicken Soup", "Potato Soup", "Tomato Soup"]
+STARTER_TOASTED_ITEMS: list[str]     = ["Toasted English Muffin", "Waffles", "Toast"]
+STARTER_DINNER_MEATS: list[str]      = ["Grilled Chicken", "Grilled Ham", "Rib Steak", "Salmon", "Steak"]
 
 # Extra recipe items unlocked by the BonusRecipes option.  Added as filler-replacements;
 # skipped entirely when the option is off.
@@ -67,9 +69,9 @@ ITEM_NAME_TO_ID: dict[str, int] = {
     "BurgerBot":        6,
     "Lollipop Powerup": 7,
     "Speed Powerup":    8,
-    "Happy Powerup":    9,
+    "Happy Powerup":    9,   # PowerupFreq_HappyGas in game files
     "Money Powerup":    10,
-    "Freeze Powerup":   11,  # PowerupFreq_HappyGas in game files
+    "Freeze Powerup":   11,  # PowerupFreq_AllHappy in game files
     "Cone Powerup":     12,  # PowerupFreq_CloseSlot in game files
     "Workstation":      13,  # WorkStation element in Layout*.xml (machine id "workstation")
 

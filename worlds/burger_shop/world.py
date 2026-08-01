@@ -46,9 +46,15 @@ class BurgerShopWorld(World):
     # Items given directly to the player at start (not placed in any location).
     # Populated in generate_early; excluded from the item pool in create_items.
     _precollected_items: list[str] = []
+    # Seed for the client's DefLevel.xml character shuffle.  Populated in generate_early.
+    _character_seed: int = 0
 
     def generate_early(self) -> None:
         self._precollected_items = []
+        # Rolled here so the shuffle is reproducible from the seed; the client rebuilds
+        # the same DefLevel.xml from it.  Characters do not affect logic, so only the
+        # client needs the resolved mapping.
+        self._character_seed = self.random.getrandbits(31)
         if self.options.start_with_cookies:
             self.multiworld.push_precollected(self.create_item("Cookies"))
             self._precollected_items.append("Cookies")
@@ -85,7 +91,10 @@ class BurgerShopWorld(World):
         return items.get_filler_item_name()
 
     def fill_slot_data(self) -> Mapping[str, Any]:
-        data = dict(self.options.as_dict("five_star_mode", "starter_recipes", "start_with_cookies", "start_with_burgerbot"))
+        data = dict(self.options.as_dict("five_star_mode", "starter_recipes", "start_with_cookies",
+                                         "start_with_burgerbot", "customer_slots",
+                                         "character_randomization"))
         data["generation_uid"] = uuid.uuid4().hex
         data["starter_assignments"] = self._starter_assignments
+        data["character_seed"] = self._character_seed
         return data
