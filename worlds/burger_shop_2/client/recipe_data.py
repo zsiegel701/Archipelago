@@ -263,7 +263,7 @@ ITEM_TO_XML_ID: dict[str, list[str]] = {
     # Condiments
     "Ketchup":                          ["ketchup"],
     "Mustard":                          ["mustard"],
-    "Ranch Dressing":                   ["ranch"],
+    "Ranch Dressing":                   ["ranch", "Ranch"],  # Dinner_Alien.xml uses capitalized "Ranch"
 
     # --- DINNER ---
     "Grilled Chicken":                  ["ChickenGrilled"],
@@ -436,6 +436,37 @@ BONUS_PAIRS: dict[str, str] = {
     "San_BreakEggSausage":       "San_BreakSausage",
     "San_BreakEggSausageCheese": "San_BreakSausage",
 }
+
+# ---------------------------------------------------------------------------
+# Genuine bonus recipes (subset of BONUS_PAIRS keys)
+# ---------------------------------------------------------------------------
+# The BONUS_PAIRS keys that correspond to an actual "--- BONUS RECIPES ---" entry
+# in ITEM_TO_XML_ID above (Quadruple Cheeseburger, Chicken Sandwich w/Cheese,
+# Hamburger w/Bacon, Mug Milk, Plain Pasta). Ninja customer files must never serve
+# these regardless of what the player has unlocked (xml_patcher's inject_bonus=False).
+#
+# The remaining BONUS_PAIRS keys — breakfast sandwich cheese variants and
+# egg+sausage compounds — are ordinary BREAKFAST_RECIPES entries that merely use
+# the same injection mechanism (they never appear literally in the vanilla order
+# files), so every customer including Ninja must still be able to order them once
+# unlocked.
+BONUS_RECIPE_XML_IDS: frozenset[str] = frozenset({
+    "MilkMug",
+    "San_QuadrupleCheeseburger",
+    "San_QuadrupleCheeseburgerLettuce",
+    "San_QuadrupleCheeseburgerLettuceTomato",
+    "San_QuadrupleBaconCheeseburger",
+    "San_QuadrupleBaconCheeseburgerLettuceTomato",
+    "San_ChickenCheeseSandwich",
+    "San_ChickenCheeseLettuce",
+    "San_ChickenCheeseLettuceTomato",
+    "San_BaconChickenCheeseLettuce",
+    "San_BaconChickenCheeseLettuceTomato",
+    "San_BaconHamburger",
+    "San_BaconHamburgerLettuce",
+    "San_BaconHamburgerLettuceTomato",
+    "PastaBoiled",
+})
 
 # ---------------------------------------------------------------------------
 # Coords.xml ox-hiding items

@@ -51,6 +51,7 @@ from .recipe_data import (
     BREAKFAST_BASE_XML_IDS,
     DINNER_BASE_XML_IDS,
     BONUS_PAIRS,
+    BONUS_RECIPE_XML_IDS,
     COORDS_OX_ITEMS,
 )
 
@@ -509,16 +510,38 @@ def _entry_is_blocked(
     return False
 
 
+def _bonus_pairs_for(inject_bonus: bool) -> dict[str, str]:
+    """BONUS_PAIRS filtered for this file's injection eligibility.
+
+    inject_bonus=False (Ninja customer files) suppresses only genuine bonus
+    recipes (BONUS_RECIPE_XML_IDS) — Ninjas must never receive Quadruple
+    Cheeseburgers, Chicken Sandwich w/Cheese, Hamburger w/Bacon, Mug Milk, or
+    Plain Pasta.  Breakfast sandwich cheese/compound variants are ordinary
+    recipes that merely use the same injection mechanism (they never appear
+    literally in the vanilla order files), so they stay available regardless.
+    """
+    if inject_bonus:
+        return BONUS_PAIRS
+    return {b: base for b, base in BONUS_PAIRS.items() if b not in BONUS_RECIPE_XML_IDS}
+
+
 def _build_dead_items(
     text: str,
     unlocked: frozenset[str],
     initial_dead: frozenset[str] = frozenset(),
     void_flairs: frozenset[str] = frozenset(),
+    inject_bonus: bool = True,
 ) -> frozenset[str]:
     """Return the set of item IDs whose entries are all blocked or reference only dead items.
 
     Iterates to a fixed point so that a dead sub-item cascades upward and makes its
     parent dead too.  void_flairs is used in the second pass after _compute_void_flairs.
+
+    The bonus-injection keep-alive check below must mirror _filter_xml's inject_bonus
+    gate: if bonus injection is disabled for this file (e.g. Ninja), an item whose only
+    surviving content would have been an injected bonus token has no way to actually
+    stay non-empty, so it must not be spared from the dead set here either — otherwise
+    parents keep referencing an item that _filter_xml later deletes as empty.
     """
     elem_entries: dict[str, list[str]] = {}
     elem_is_sandwich: dict[str, bool] = {}
@@ -559,10 +582,13 @@ def _build_dead_items(
             ):
                 # Keep alive if a bonus injection is eligible: a bonus item is unlocked
                 # and its paired base was present in this element's original body.
+                # Uses the same inject_bonus-filtered pair set as the actual injection
+                # in _filter_xml, so an item never survives here on the strength of a
+                # bonus token that won't actually be written into its body.
                 original_values = {_entry_value(e).rstrip("+") for e in entries}
                 if any(
                     base in original_values and bonus in unlocked
-                    for bonus, base in BONUS_PAIRS.items()
+                    for bonus, base in _bonus_pairs_for(inject_bonus).items()
                 ):
                     continue
                 dead.add(item_id)
@@ -579,11 +605,11 @@ def _filter_xml(
     inject_bonus: bool = True,
     stub_order: str = _LAST_RESORT_STUB,
 ) -> str:
-    dead = _build_dead_items(text, unlocked, initial_dead)
+    dead = _build_dead_items(text, unlocked, initial_dead, inject_bonus=inject_bonus)
     void_flairs = _compute_void_flairs(text, unlocked, dead)
     # Second pass: items with required (+) void-flair references are now also dead
     # (e.g. RandomDessertCourse referencing a void RandomCake+ flair).
-    dead = _build_dead_items(text, unlocked, initial_dead, void_flairs)
+    dead = _build_dead_items(text, unlocked, initial_dead, void_flairs, inject_bonus=inject_bonus)
     pool_kept_counts = _compute_kept_counts(text, unlocked, dead)
 
     def _replace(m: re.Match) -> str:
@@ -638,10 +664,12 @@ def _filter_xml(
         # present in this Item element and the bonus AP item is now unlocked, append
         # the bonus item ID.  The bonus IDs are never present in the source (.orig)
         # files — the patcher is the only thing that writes them.
-        # inject_bonus=False is used for files where bonus recipes must never appear
-        # (e.g. ninja customer files) regardless of what the player has unlocked.
-        if inject_bonus and tag_name in ("item", "flair"):
-            for bonus_xml, base_xml in BONUS_PAIRS.items():
+        # inject_bonus=False is used for files where genuine bonus recipes must never
+        # appear (e.g. ninja customer files) regardless of what the player has
+        # unlocked; breakfast sandwich cheese/compound variants are excluded from that
+        # suppression (see _bonus_pairs_for) since they are ordinary recipes.
+        if tag_name in ("item", "flair"):
+            for bonus_xml, base_xml in _bonus_pairs_for(inject_bonus).items():
                 if base_xml in original_values and bonus_xml in unlocked:
                     kept.append(bonus_xml)
 
@@ -913,9 +941,9 @@ def _patch_file(
     with open(orig, encoding="utf-8", errors="replace") as f:
         text = f.read()
 
-    dead = _build_dead_items(text, unlocked, initial_dead)
+    dead = _build_dead_items(text, unlocked, initial_dead, inject_bonus=inject_bonus)
     void_flairs = _compute_void_flairs(text, unlocked, dead)
-    dead = _build_dead_items(text, unlocked, initial_dead, void_flairs)
+    dead = _build_dead_items(text, unlocked, initial_dead, void_flairs, inject_bonus=inject_bonus)
 
     stub_order = _pick_stub(filename, initial_dead | dead)
 
