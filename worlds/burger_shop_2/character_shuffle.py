@@ -17,6 +17,7 @@ from .character_data import (
     FROZEN_CHARACTERS,
     GATED_CHARACTERS,
     STORY_LEVEL_CUSTOMER_IDS,
+    UNGATED_CUSTOMER_IDS,
     VANILLA_CUSTOMERS,
 )
 
@@ -35,8 +36,16 @@ _POOL: tuple[str, ...] = tuple(sorted({
     if name.lower() not in FROZEN_CHARACTERS
 } | set(EXTRA_POOL_CHARACTERS)))
 
+# The draw pool for UNGATED_CUSTOMER_IDS: no character whose order is hidden behind an
+# AP item, so those levels stay completable with nothing collected.
+_UNGATED_POOL: tuple[str, ...] = tuple(
+    name for name in _POOL if name.lower() not in GATED_CHARACTERS
+)
 
-def _resolve_pool(groups: CharacterGroups, mode: int, rng: random.Random) -> CharacterGroups:
+
+def _resolve_pool(
+    groups: CharacterGroups, mode: int, rng: random.Random, pool: tuple[str, ...] = _POOL,
+) -> CharacterGroups:
     """Re-roll one <Customer> pool, leaving frozen characters exactly as they are."""
     frozen = {i for i, (_, name) in enumerate(groups) if name.lower() in FROZEN_CHARACTERS}
     live = [i for i in range(len(groups)) if i not in frozen]
@@ -47,11 +56,12 @@ def _resolve_pool(groups: CharacterGroups, mode: int, rng: random.Random) -> Cha
         # Each group keeps its size and gets a new character.  Sampling without
         # replacement stops two groups collapsing onto one character, so a level
         # never ends up with less variety than vanilla gave it.  The fallback is
-        # unreachable with the vanilla tables (max 20 groups, pool of 20).
-        if len(live) <= len(_POOL):
-            names = rng.sample(_POOL, len(live))
+        # reachable only for a pool trimmed by UNGATED_CUSTOMER_IDS, where a level with
+        # more groups than the pool has characters has to repeat one.
+        if len(live) <= len(pool):
+            names = rng.sample(pool, len(live))
         else:
-            names = [rng.choice(_POOL) for _ in live]
+            names = [rng.choice(pool) for _ in live]
         out = list(groups)
         for i, name in zip(live, names):
             out[i] = (groups[i][0], name)
@@ -62,8 +72,8 @@ def _resolve_pool(groups: CharacterGroups, mode: int, rng: random.Random) -> Cha
     total = sum(groups[i][0] for i in live)
     if total < 1:
         return groups
-    count = rng.randint(1, min(len(_POOL), total))
-    names = rng.sample(_POOL, count)
+    count = rng.randint(1, min(len(pool), total))
+    names = rng.sample(pool, count)
     # Random composition of `total` into `count` parts of at least 1 (stars and bars).
     cuts = sorted(rng.sample(range(1, total), count - 1)) if count > 1 else []
     sizes = [b - a for a, b in zip([0] + cuts, cuts + [total])]
@@ -87,7 +97,10 @@ def resolve(mode: int, seed: int) -> dict[str, CharacterGroups]:
         return dict(VANILLA_CUSTOMERS)
     rng = random.Random(seed)
     return {
-        customer_id: _resolve_pool(groups, mode, rng)
+        customer_id: _resolve_pool(
+            groups, mode, rng,
+            _UNGATED_POOL if customer_id in UNGATED_CUSTOMER_IDS else _POOL,
+        )
         for customer_id, groups in VANILLA_CUSTOMERS.items()
     }
 

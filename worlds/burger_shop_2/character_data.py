@@ -22,6 +22,12 @@ GATED_CHARACTERS: dict[str, str] = {
 # built-in alien requirement, so the Alien takes part in the shuffle like anyone else.
 FROZEN_CHARACTERS: frozenset[str] = frozenset()
 
+# <Customer> pools that must never draw a GATED_CHARACTERS entry.  It's
+# theoretically possible for gated characters to be generated for all early
+# levels, possibly making generation fail.  This ensures that level 1 contains
+# no gated characters.  Vanilla already keeps these characters out of it.
+UNGATED_CUSTOMER_IDS: frozenset[str] = frozenset({"customers1-1a"})
+
 # Characters that can be shuffled *in* even though no vanilla pool contains them.
 # Burger Shop 2 ships Breakfast/Order/Dinner_Alien.xml and a CustomerTimes entry for
 # the Alien, but DefLevel_Test.xml never references it, so story mode never shows one.
