@@ -15,7 +15,7 @@ LOCATION_NAME_TO_ID: dict[str, int] = {
     f"Story Level {n}": 1000 + n for n in range(1, 81)
 } | {
     # Starter locations (StarterRecipes option only) — auto-checked by the client
-    # immediately after Story Level 1 is completed.
+    # as soon as any story level is completed.
     "Starter Side":    1081,
     "Starter Soda":    1082,
     "Starter Dessert": 1083,

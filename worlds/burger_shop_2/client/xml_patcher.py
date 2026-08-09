@@ -1,10 +1,16 @@
 """
 Patch Burger Shop 2 customer order XML files to reflect which AP recipes have been received.
 
-Pre-setup: copy the game's loose XML files to
+Pre-setup: install the data package into
 ``<game_path>/archipelago/levels/`` and add
 ``<String id="LooseFilePath">archipelago</String>`` to
 ``properties/params_user.xml``.
+
+Every file ships as ``<name>.xml.orig`` — the pristine copy every patch reads
+from — and the patcher writes the loose ``<name>.xml`` the game loads.  Because
+the source is never written, the original is never lost and newly received items
+can always be re-added cleanly.  Installs predating this layout have only
+``<name>.xml``; those are backed up to ``.orig`` on first patch.
 
 Patched file types:
   Breakfast_*.xml  — breakfast customer order pools
@@ -310,6 +316,56 @@ _ATTR_ENABLED_BY: dict[str, frozenset[str]] = {
 
 def _levels_dir(game_path: str) -> str:
     return os.path.join(game_path, _LEVELS_SUBDIR)
+
+
+def _source_and_target(levels_dir: str, filename: str) -> tuple[str, str] | None:
+    """Resolve *filename* to its ``(pristine_source, patch_target)`` paths.
+
+    The data package ships ``<name>.xml.orig`` and no ``<name>.xml``, so the
+    .orig is the source every patch reads and the .xml is the output the game
+    loads.  Installs predating that layout have only the .xml; it is copied to
+    .orig on first use so those keep working.  Returns None when the file is
+    not installed at all.
+    """
+    target = os.path.join(levels_dir, filename)
+    source = target + ".orig"
+
+    if not os.path.isfile(source):
+        if not os.path.isfile(target):
+            return None
+        shutil.copy2(target, source)
+
+    return source, target
+
+
+def _seed_loose_files(levels_dir: str) -> None:
+    """Copy every shipped ``<name>.xml.orig`` to ``<name>.xml`` if that is missing.
+
+    The game only loads a file loosely when the plain .xml is present, otherwise it
+    falls back to the copy packed in the game's .pak.  Several shipped files are
+    never rewritten by the patcher (DefLevelExp.xml, CustomerTimes.xml, Level*.xml,
+    …), so without this the shipped versions of those would never reach the game.
+    """
+    for name in os.listdir(levels_dir):
+        if not name.endswith(".xml.orig"):
+            continue
+        target = os.path.join(levels_dir, name[:-len(".orig")])
+        if not os.path.isfile(target):
+            shutil.copy2(os.path.join(levels_dir, name), target)
+
+
+def _installed_xml_names(levels_dir: str) -> list[str]:
+    """Sorted ``<name>.xml`` names present in *levels_dir*, in either form.
+
+    The scan has to look at both extensions: a fresh install holds only .orig
+    files, while an install that has already been patched holds both.
+    """
+    names = {
+        name[:-5] if name.endswith(".orig") else name
+        for name in os.listdir(levels_dir)
+        if name.endswith(".xml") or name.endswith(".xml.orig")
+    }
+    return sorted(names)
 
 
 def _entry_value(entry: str) -> str:
@@ -755,14 +811,10 @@ def _set_attr(text: str, attr: str, value: str) -> str:
 
 
 def _patch_layout_file(levels_dir: str, filename: str, received: frozenset[str]) -> None:
-    src = os.path.join(levels_dir, filename)
-    orig = src + ".orig"
-
-    if not os.path.isfile(src):
+    paths = _source_and_target(levels_dir, filename)
+    if paths is None:
         return
-
-    if not os.path.isfile(orig):
-        shutil.copy2(src, orig)
+    orig, src = paths
 
     with open(orig, encoding="utf-8", errors="replace") as f:
         text = f.read()
@@ -801,14 +853,10 @@ _CUSTOMER_ELEM_RE = re.compile(
 
 def _patch_deflevel_xml(levels_dir: str, character_map: dict | None) -> None:
     """Write *character_map* into DefLevel_Test.xml; restore vanilla when it is None."""
-    src = os.path.join(levels_dir, _DEFLEVEL_FILE)
-    orig = src + ".orig"
-
-    if not os.path.isfile(src):
+    paths = _source_and_target(levels_dir, _DEFLEVEL_FILE)
+    if paths is None:
         return
-
-    if not os.path.isfile(orig):
-        shutil.copy2(src, orig)
+    orig, src = paths
 
     with open(orig, encoding="utf-8", errors="replace") as f:
         text = f.read()
@@ -831,14 +879,10 @@ _COORDS_OX_HIDDEN: str = "2100000000"
 
 
 def _patch_coords_xml(levels_dir: str, received: frozenset[str]) -> None:
-    src = os.path.join(levels_dir, "Coords.xml")
-    orig = src + ".orig"
-
-    if not os.path.isfile(src):
+    paths = _source_and_target(levels_dir, "Coords.xml")
+    if paths is None:
         return
-
-    if not os.path.isfile(orig):
-        shutil.copy2(src, orig)
+    orig, src = paths
 
     with open(orig, encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
@@ -859,24 +903,20 @@ def _patch_game_xml(
     received: frozenset[str],
     customer_slots: int = 0,
 ) -> list[tuple[str, str]]:
-    game_src = os.path.join(levels_dir, "Game.xml")
-    game_orig = game_src + ".orig"
-    gameexp_src = os.path.join(levels_dir, "GameExp.xml")
-    gameexp_orig = gameexp_src + ".orig"
-
-    if not os.path.isfile(game_src):
+    game_paths = _source_and_target(levels_dir, "Game.xml")
+    if game_paths is None:
         return []
+    game_orig, game_src = game_paths
 
-    if not os.path.isfile(game_orig):
-        shutil.copy2(game_src, game_orig)
-
-    # Preserve the original GameExp.xml as a backup, even though we no longer read from it.
-    if os.path.isfile(gameexp_src) and not os.path.isfile(gameexp_orig):
-        shutil.copy2(gameexp_src, gameexp_orig)
+    # Resolved only to preserve the vanilla GameExp.xml as a backup before the
+    # overwrite below; its contents are never read.
+    gameexp_paths = _source_and_target(levels_dir, "GameExp.xml")
 
     with open(game_orig, encoding="utf-8", errors="replace") as f:
         text = f.read()
 
+    # Absent until the first patch of a fresh install, which reports no changes
+    # — correct, since there is nothing in memory from it to correct yet.
     try:
         with open(game_src, encoding="utf-8", errors="replace") as f:
             prev_text = f.read()
@@ -908,8 +948,8 @@ def _patch_game_xml(
     # GameExp.xml is overwritten with the patched Game.xml so that expert story mode
     # uses the same level structure (CustomerFile, Stage visuals, CustomerSlots
     # progression) instead of DefLevelExp.xml with its harder EarningGoal targets.
-    if os.path.isfile(gameexp_src):
-        with open(gameexp_src, "w", encoding="utf-8") as f:
+    if gameexp_paths is not None:
+        with open(gameexp_paths[1], "w", encoding="utf-8") as f:
             f.write(text)
 
     return all_changes
@@ -929,14 +969,10 @@ def _patch_file(
 ) -> frozenset[str]:
     """Filter one customer file.  The empty-order stub is chosen from *filename*'s
     mealtime, so a starved breakfast customer falls back to the Random breakfast."""
-    src = os.path.join(levels_dir, filename)
-    orig = src + ".orig"
-
-    if not os.path.isfile(src):
+    paths = _source_and_target(levels_dir, filename)
+    if paths is None:
         return frozenset()
-
-    if not os.path.isfile(orig):
-        shutil.copy2(src, orig)
+    orig, src = paths
 
     with open(orig, encoding="utf-8", errors="replace") as f:
         text = f.read()
@@ -970,14 +1006,10 @@ def _patch_complexitems_flairs(
     function patches only the flair IDs in _COMPLEXITEMS_FILTERED_FLAIR_IDS,
     leaving sandwiches, pasta flairs, and parent salad/snack wrappers untouched.
     """
-    src = os.path.join(levels_dir, "ComplexItems.xml")
-    orig = src + ".orig"
-
-    if not os.path.isfile(src):
+    paths = _source_and_target(levels_dir, "ComplexItems.xml")
+    if paths is None:
         return
-
-    if not os.path.isfile(orig):
-        shutil.copy2(src, orig)
+    orig, src = paths
 
     with open(orig, encoding="utf-8", errors="replace") as f:
         text = f.read()
@@ -1067,6 +1099,11 @@ def apply_bs2_recipe_unlocks(
         )
         return False, []
 
+    try:
+        _seed_loose_files(levels)
+    except OSError as e:
+        logger.warning(f"[Burger Shop 2] Failed to lay down loose level files: {e}")
+
     unlocked = _compute_unlocked(received_item_names)
     received_set = frozenset(received_item_names)
 
@@ -1085,8 +1122,8 @@ def apply_bs2_recipe_unlocks(
     char_dead_acc: set[str] = set()
     all_xml_names: list[str] = []
     patched = set(_RANDOM_FILES)
-    for name in sorted(os.listdir(levels)):
-        if not name.endswith(".xml") or name in patched:
+    for name in _installed_xml_names(levels):
+        if name in patched:
             continue
         if name.lower() in _SKIP_FILES:
             continue

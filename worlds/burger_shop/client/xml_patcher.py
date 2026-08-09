@@ -1,16 +1,18 @@
 """
 Patch game Order_*.xml files to reflect which recipes have been received.
 
-Pre-setup: the player copies the original game XML files to
+Pre-setup: the player installs the data package into
 ``<game_path>/archipelago/levels/`` and adds
 ``<String id="LooseFilePath">archipelago</String>`` to
 ``properties/params_user.xml``.  The game then reads those loose files
 instead of the packed ones in BurgerShop.pak, so the client can freely
 rewrite them to control which recipes appear in customer orders.
 
-On the first patch, each target file is backed up to ``<name>.xml.orig``.
-All subsequent patches read from the backup, so the original is never lost
-and newly received items can always be re-added cleanly.
+Every file ships as ``<name>.xml.orig`` — the pristine copy the patcher always
+reads from — and the patcher writes the loose ``<name>.xml`` the game loads.
+Because the source is never written, the original is never lost and newly
+received items can always be re-added cleanly.  Installs predating this layout
+have only ``<name>.xml``; those are backed up to ``.orig`` on first patch.
 
 XML format notes (from the actual game files):
   - Recipe choices are comma-separated weighted entries inside a single
@@ -182,6 +184,42 @@ _LAYOUT_ELEMENT_ITEMS: dict[str, str] = {
 
 def _levels_dir(game_path: str) -> str:
     return os.path.join(game_path, _LEVELS_SUBDIR)
+
+
+def _source_and_target(levels_dir: str, filename: str) -> tuple[str, str] | None:
+    """Resolve *filename* to its ``(pristine_source, patch_target)`` paths.
+
+    The data package ships ``<name>.xml.orig`` and no ``<name>.xml``, so the
+    .orig is the source every patch reads and the .xml is the output the game
+    loads.  Installs predating that layout have only the .xml; it is copied to
+    .orig on first use so those keep working.  Returns None when the file is
+    not installed at all.
+    """
+    target = os.path.join(levels_dir, filename)
+    source = target + ".orig"
+
+    if not os.path.isfile(source):
+        if not os.path.isfile(target):
+            return None
+        shutil.copy2(target, source)
+
+    return source, target
+
+
+def _seed_loose_files(levels_dir: str) -> None:
+    """Copy every shipped ``<name>.xml.orig`` to ``<name>.xml`` if that is missing.
+
+    The game only loads a file loosely when the plain .xml is present, otherwise it
+    falls back to the copy packed in BurgerShop.pak.  Most of the data package is
+    never rewritten by the patcher (Order_Alien.xml, Level*.xml, CustomerTimes.xml,
+    …), so without this the shipped versions of those would never reach the game.
+    """
+    for name in os.listdir(levels_dir):
+        if not name.endswith(".xml.orig"):
+            continue
+        target = os.path.join(levels_dir, name[:-len(".orig")])
+        if not os.path.isfile(target):
+            shutil.copy2(os.path.join(levels_dir, name), target)
 
 
 def _compute_unlocked_strings(received_item_names: list[str]) -> frozenset[str]:
@@ -435,15 +473,10 @@ def _patch_file(
     unlocked: frozenset[str],
     stub_order: str = _LAST_RESORT_STUB,
 ) -> None:
-    src = os.path.join(levels_dir, filename)
-    orig = src + ".orig"
-
-    if not os.path.isfile(src):
+    paths = _source_and_target(levels_dir, filename)
+    if paths is None:
         return
-
-    # Back up the original on first run; always restore from the backup.
-    if not os.path.isfile(orig):
-        shutil.copy2(src, orig)
+    orig, src = paths
 
     with open(orig, encoding="utf-8", errors="replace") as f:
         text = f.read()
@@ -467,14 +500,10 @@ def _item_is_live(levels_dir: str, filename: str, item_id: str) -> bool:
 
 
 def _patch_layout_xml(levels_dir: str, received: frozenset[str]) -> None:
-    src = os.path.join(levels_dir, _LAYOUT_FILE)
-    orig = src + ".orig"
-
-    if not os.path.isfile(src):
+    paths = _source_and_target(levels_dir, _LAYOUT_FILE)
+    if paths is None:
         return
-
-    if not os.path.isfile(orig):
-        shutil.copy2(src, orig)
+    orig, src = paths
 
     with open(orig, encoding="utf-8", errors="replace") as f:
         text = f.read()
@@ -610,14 +639,10 @@ def _randomize_customer_body(
 
 def _patch_deflevel_xml(levels_dir: str, mode: int, seed: int) -> None:
     """Rewrite DefLevel.xml's <Customer> lists according to *mode*."""
-    src = os.path.join(levels_dir, _DEFLEVEL_FILE)
-    orig = src + ".orig"
-
-    if not os.path.isfile(src):
+    paths = _source_and_target(levels_dir, _DEFLEVEL_FILE)
+    if paths is None:
         return
-
-    if not os.path.isfile(orig):
-        shutil.copy2(src, orig)
+    orig, src = paths
 
     with open(orig, encoding="utf-8", errors="replace") as f:
         text = f.read()
@@ -664,20 +689,18 @@ def _patch_game_xml(
     changes take effect without requiring a game restart.  *customer_slots* forces every
     level to that many customer slots; 0 keeps the vanilla per-level counts.
     """
-    src = os.path.join(levels_dir, _GAME_XML_FILE)
-    orig = src + ".orig"
-
-    if not os.path.isfile(src):
+    paths = _source_and_target(levels_dir, _GAME_XML_FILE)
+    if paths is None:
         return []
-
-    if not os.path.isfile(orig):
-        shutil.copy2(src, orig)
+    orig, src = paths
 
     # .orig is always the enabled/original state; read it as the clean base.
     with open(orig, encoding="utf-8", errors="replace") as f:
         text = f.read()
 
-    # Read the current live file to detect what will change in memory.
+    # Read the current live file to detect what will change in memory.  It is
+    # absent until the first patch of a fresh install, which reports no changes
+    # — correct, since there is nothing in memory from it to correct yet.
     try:
         with open(src, encoding="utf-8", errors="replace") as f:
             prev_text = f.read()
@@ -735,10 +758,12 @@ def restart_sensitive_hash(game_path: str) -> str:
 
 
 def archipelago_levels_ready(game_path: str) -> bool:
-    """Return True if the archipelago/levels directory contains Order XML files."""
-    return os.path.isfile(
-        os.path.join(_levels_dir(game_path), "Order_BizChick.xml")
-    )
+    """Return True if the archipelago/levels directory contains Order XML files.
+
+    A freshly installed data package has only the .orig, so either form counts.
+    """
+    order_file = os.path.join(_levels_dir(game_path), "Order_BizChick.xml")
+    return os.path.isfile(order_file) or os.path.isfile(order_file + ".orig")
 
 
 def apply_recipe_unlocks(
@@ -770,6 +795,11 @@ def apply_recipe_unlocks(
             "LooseFilePath=archipelago to properties/params_user.xml."
         )
         return False, []
+
+    try:
+        _seed_loose_files(levels)
+    except OSError as e:
+        logger.warning(f"[Burger Shop] Failed to lay down loose level files: {e}")
 
     unlocked = _compute_unlocked_strings(received_item_names)
     received_set = frozenset(received_item_names)
